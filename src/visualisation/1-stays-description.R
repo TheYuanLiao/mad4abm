@@ -25,11 +25,11 @@ con <- DBI::dbConnect(RPostgres::Postgres(),
                       user = user,
                       password = password,
                       port = port)
-df <- dbGetQuery(con, 'SELECT * FROM description.vgr_stops_2019')
+df <- dbGetQuery(con, 'SELECT * FROM description.stops')
 vars <- c("# of days", "# of stays", "# of stays per active day",
-          "Total duration per active day, hours", "Share of isolated stays", "Duration per stay, min")
+          "Total duration per active day, hours", "Duration per stay, min")
 var.names <- names(df)
-var.names <- var.names[! var.names == 'device_uid']
+var.names <- var.names[! var.names == 'uid']
 names(vars) <- var.names
 
 plot.var.ccdf <- function(df, var, vars){

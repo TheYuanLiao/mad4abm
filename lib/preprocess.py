@@ -12,6 +12,8 @@ from tqdm import tqdm
 from geopandas import GeoDataFrame
 from shapely.geometry import Point
 from math import radians, cos, sin, asin, sqrt
+from timezonefinder import TimezoneFinder
+from datetime import datetime
 
 
 def get_repo_root():
@@ -25,6 +27,18 @@ def get_repo_root():
 ROOT_dir = get_repo_root()
 with open(os.path.join(ROOT_dir, 'dbs', 'keys.yaml')) as f:
     keys_manager = yaml.load(f, Loader=yaml.FullLoader)
+
+
+def convert_to_location_tz(row, _tf=TimezoneFinder()):
+    # if lat/lon aren't specified, we just want the existing name (e.g. UTC)
+    if (row.lat == 0) & (row.lng == 0):
+        return row.datetime.tz_localize('UTC').tzname(), row.datetime, row.leaving_datetime
+    # otherwise, try to find tz name
+    tzname = _tf.timezone_at(lng=row.lng, lat=row.lat)
+    if tzname: # return the name if it is not None
+        return tzname, row.datetime.tz_localize('UTC').tz_convert(tzname),\
+               row.leaving_datetime.tz_localize('UTC').tz_convert(tzname)
+    return row.datetime.tz_localize('UTC').tzname(), row.datetime, row.leaving_datetime  # else return existing name
 
 
 def raw2df2db(file, user, password, port, db_name, table_name, schema_name):
@@ -49,7 +63,7 @@ def raw2df2db(file, user, password, port, db_name, table_name, schema_name):
     return df
 
 
-def raw2chunk2db(file, user, password, port, db_name, table_name, schema_name):
+def raw2chunk2db(file, user, password, port, db_name, table_name, schema_name, folder_under_db="original_input_data"):
     """
     Read the compressed files and get the chunk for dumping.
     :param file: a string that points to raw records, e.g., "VGR_raw_mobile_2019_10.csv.gz"
@@ -57,7 +71,7 @@ def raw2chunk2db(file, user, password, port, db_name, table_name, schema_name):
     A dataframe with each row a request record.
     """
     engine = sqlalchemy.create_engine(f'postgresql://{user}:{password}@localhost:{port}/{db_name}')
-    raw_folder = os.path.join(ROOT_dir, "dbs", "original_input_data")
+    raw_folder = os.path.join(ROOT_dir, "dbs", folder_under_db)
     chunk_container = pd.read_csv(os.path.join(raw_folder, file + ".gz"), sep=',',
                                   header=0, iterator=True,
                                   compression='gzip',
@@ -69,6 +83,20 @@ def raw2chunk2db(file, user, password, port, db_name, table_name, schema_name):
         df.to_sql(table_name, engine, schema=schema_name, index=False, if_exists='append', method='multi', chunksize=5000)
     end = time.time()
     print(end - start)
+    return df
+
+
+def raw_time_processing(filepath, selectedcols):
+    """
+    Read the compressed files and get the chunk for time processing.
+    :param file: a string that points to raw records, e.g., "VGR_raw_mobile_2019_10.csv.gz"
+    :return:
+    A dataframe with each row a record.
+    """
+    df = pd.read_csv(filepath, sep='\t', compression='gzip', usecols=selectedcols)
+    df = df.loc[df['timestamp'] != 'timestamp', :]
+    df['timestamp'] = df['timestamp'].astype(int)
+    df.loc[:, "TimeUTC"] = df.apply(lambda row: datetime.fromtimestamp(row['timestamp']), axis=1)
     return df
 
 
@@ -231,3 +259,63 @@ def df2batches(df, chunk_size=30000):
         df_batch = df.loc[i * chunk_size:(i + 1) * chunk_size, :]
         df_list.append(df_batch)
     return df_list
+
+
+def cluster_tempo(pur=None, temps=None, prt=True):
+    """
+    :param pur: Purpose to add to the activity
+    :type pur: str
+    :param temps: List of tuples containing start half-hour and duration
+    :type temps: list
+    :return: A dataframe of half-hour frequency of a certain activity.
+    :rtype:
+    """
+    holder = np.zeros((48, 1))
+    if prt:
+        for tm in tqdm(temps, desc='Counting minute stays'):
+            start_ = int(np.floor(tm[0] / 30))
+            end_ = int(np.floor((tm[0] + int(tm[1])) / 30))
+            holder[start_:end_ + 1, 0] += 1
+    else:
+        for tm in temps:
+            start_ = int(np.floor(tm[0] / 30))
+            end_ = int(np.floor((tm[0] + int(tm[1])) / 30))
+            holder[start_:end_ + 1, 0] += 1
+    df = pd.DataFrame()
+    df.loc[:, 'half_hour'] = range(0, 48)
+    df.loc[:, 'freq'] = holder / max(holder)
+    if pur is not None:
+        df.loc[:, 'activity'] = pur
+    return df
+
+
+def cluster_tempo_weighted(pur=None, temps=None, prt=True):
+    """
+    :param pur: Purpose to add to the activity
+    :type pur: str
+    :param temps: List of tuples containing start half_hour, duration, and weight
+    :type temps: list
+    :return: A dataframe of half-hour frequency of a certain activity.
+    :rtype:
+    """
+    holder = np.zeros((48, 1))
+    holder_wt = np.zeros((48, 1))
+    if prt:
+        for tm in tqdm(temps, desc='Counting minute stays'):
+            start_ = int(np.floor(tm[0] / 30))
+            end_ = int(np.floor((tm[0] + int(tm[1])) / 30))
+            holder[start_:end_ + 1, 0] += 1
+            holder_wt[start_:end_ + 1, 0] += tm[2]
+    else:
+        for tm in temps:
+            start_ = int(np.floor(tm[0] / 30))
+            end_ = int(np.floor((tm[0] + int(tm[1])) / 30))
+            holder[start_:end_ + 1, 0] += 1
+            holder_wt[start_:end_ + 1, 0] += tm[2]
+    df = pd.DataFrame()
+    df.loc[:, 'half_hour'] = range(0, 48)
+    df.loc[:, 'freq'] = holder / max(holder)
+    df.loc[:, 'freq_wt'] = holder_wt / max(holder_wt)
+    if pur is not None:
+        df.loc[:, 'activity'] = pur
+    return df
