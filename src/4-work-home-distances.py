@@ -2,11 +2,8 @@ import sys
 import subprocess
 import os
 import pandas as pd
-from datetime import datetime
 import sqlalchemy
-import numpy as np
 import time
-from tqdm import tqdm
 
 
 def get_repo_root():
