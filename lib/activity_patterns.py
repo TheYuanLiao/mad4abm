@@ -262,3 +262,101 @@ class CommuteODM:
             f'postgresql://{self.user}:{self.password}@localhost:{self.port}/{self.db_name}')
         self.home_work_zones.to_sql(f'home_work_zones', engine, schema='description', index=False, if_exists='replace',
                       method='multi', chunksize=5000)
+
+
+class ODMComparison:
+    def __init__(self):
+        self.user = preprocess.keys_manager['database']['user']
+        self.password = preprocess.keys_manager['database']['password']
+        self.port = preprocess.keys_manager['database']['port']
+        self.db_name = preprocess.keys_manager['database']['name']
+        engine = sqlalchemy.create_engine(
+            f'postgresql://{self.user}:{self.password}@localhost:{self.port}/{self.db_name}')
+        self.survey_deso = pd.read_csv(os.path.join(ROOT_dir, 'dbs/survey/commute_od_deso.csv'))
+        self.survey_muni = pd.read_csv(os.path.join(ROOT_dir, 'dbs/survey/commute_od_municipality.csv'))
+        self.survey_muni = self.survey_muni.astype({"ozone": "int", "dzone": "int"})
+        self.home_work = pd.read_sql_query(sql="""SELECT * FROM description.home_work_zones;""", con=engine)
+        self.deso_pop = pd.read_sql_query(sql="""SELECT deso, befolkning FROM public.zones;""", con=engine) \
+            .rename(columns={'deso': 'zone', 'befolkning': 'pop'})
+
+    def distance_thresholds(self):
+        df_dist = self.home_work.drop_duplicates(subset=['uid', 'activity'])
+        _, bins_h = pd.qcut(df_dist.loc[(df_dist.activity == 'Home') & (~df_dist.dist.isna()), 'dist'], q=10, retbins=True)
+        _, bins_w = pd.qcut(df_dist.loc[(df_dist.activity == 'Work') & (~df_dist.dist.isna()), 'dist'], q=10, retbins=True)
+        return dict(thre_h=bins_h[1:], thre_w=bins_w[1:])
+
+    def individual_weight(self, df_mad=None):
+        # This weight is always at DeSO level
+        # df_mad: uid, zone
+        df_mad_pop = df_mad.groupby('zone').size().to_frame(name='pop_mad').reset_index()   # zone, pop_mad
+        df_mad_pop = pd.merge(df_mad_pop, self.deso_pop, on=['zone'], how='left')
+        df_mad_pop.loc[:, 'wt'] = df_mad_pop.loc[:, 'pop'] / df_mad_pop.loc[:, 'pop_mad']   # zone, pop_mad, wt
+        df_mad = pd.merge(df_mad, df_mad_pop, on=['zone'], how='left')
+        return dict(zip(df_mad.uid, df_mad.wt))
+
+    def mad_odm(self, dist_thre=None, level=None):
+        df_dict = dict()
+        num_thre = len(dist_thre['thre_h'])
+        for qt, thre_h, thre_w in tqdm(zip(range(1, num_thre + 1), dist_thre['thre_h'], dist_thre['thre_w']),
+                                       desc='Producing ODM data per distance thresholds'):
+            df_h_deso = self.home_work.loc[(self.home_work.activity == 'Home') &
+                                      (self.home_work.level == 'DeSO') &
+                                      (self.home_work.dist <= thre_h), ['uid', 'zone']]
+            uid_weights = self.individual_weight(df_mad=df_h_deso)
+            df_h = self.home_work.loc[(self.home_work.activity == 'Home') &
+                                      (self.home_work.level == level) &
+                                      (self.home_work.dist <= thre_h), ['uid', 'zone']].rename(columns={'zone': 'ozone'})
+            df_w = self.home_work.loc[(self.home_work.activity == 'Work') &
+                                      (self.home_work.level == level) &
+                                      (self.home_work.dist <= thre_w), ['uid', 'zone']].rename(columns={'zone': 'dzone'})
+            df = pd.merge(df_h, df_w, on='uid', how='inner')
+            df.loc[:, 'wt'] = df.uid.apply(lambda x: uid_weights[x])
+            df_dict[qt] = df
+        return df_dict
+
+    def odm_aggregation(self, df_dict=None, level=None):
+        # Put MAD ODMs and ground truth data together
+        # sv_commute, mad_commute
+        df_agg_list = []
+        for qt, df in df_dict.items():
+            df_odm_mad = df.groupby(['ozone', 'dzone'])['wt'].sum().to_frame('mad_commute').reset_index()
+            if level == 'DeSO':
+                df_agg = pd.merge(self.survey_deso, df_odm_mad, on=['ozone', 'dzone'], how='left').fillna(0)
+            else:
+                df_odm_mad = df_odm_mad.astype({"ozone": "float", "dzone": "float"})
+                df_odm_mad = df_odm_mad.astype({"ozone": "int", "dzone": "int"})
+                df_agg = pd.merge(self.survey_muni, df_odm_mad, on=['ozone', 'dzone'], how='left').fillna(0)
+                df_agg = df_agg.astype({"ozone": "int", "dzone": "int"})
+            df_agg.loc[:, 'qt'] = qt
+            df_agg.loc[:, 'level'] = level
+            df_agg_list.append(df_agg)
+        return pd.concat(df_agg_list)
+
+    def odm_comparison(self, df_odms=None, gt_field=None, mad_field=None):
+        def ssi_measure(data):
+            data_ = data.copy()
+            # Convert trip number to trip frequency (ranging between 0 and 1)
+            data_.loc[:, gt_field] = data_.loc[:, gt_field] / data_.loc[:, gt_field].sum()
+            data_.loc[:, mad_field] = data_.loc[:, mad_field] / data_.loc[:, mad_field].sum()
+            data_.loc[:, 'flow_min'] = data_.apply(lambda row: min(row[gt_field], row[mad_field]), axis=1)
+            SSI = 2 * data_.loc[:, 'flow_min'].sum() / \
+                  (data_.loc[:, gt_field].sum() + data_.loc[:, mad_field].sum())
+
+            # Keep non-zero for both to compare
+            data_non_zero = data.copy()
+            data_non_zero = data_non_zero.loc[(data_non_zero[gt_field] != 0) & (data_non_zero[mad_field] != 0)]
+            data_non_zero.loc[:, gt_field] = data_non_zero.loc[:, gt_field] / data_non_zero.loc[:, gt_field].sum()
+            data_non_zero.loc[:, mad_field] = data_non_zero.loc[:, mad_field] / data_non_zero.loc[:, mad_field].sum()
+            data_non_zero.loc[:, 'flow_min'] = data_non_zero.apply(lambda row: min(row[gt_field], row[mad_field]), axis=1)
+            SSI_n = 2 * data_non_zero.loc[:, 'flow_min'].sum() / \
+                  (data_non_zero.loc[:, gt_field].sum() + data_non_zero.loc[:, mad_field].sum())
+            return pd.Series(dict(ssi=SSI, ssi_n=SSI_n))
+        tqdm.pandas()
+        df_ssi = df_odms.groupby(['level', 'qt']).progress_apply(ssi_measure).reset_index()
+        return df_ssi
+
+
+
+
+
+
