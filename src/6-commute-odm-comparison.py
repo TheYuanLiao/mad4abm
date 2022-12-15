@@ -40,9 +40,20 @@ if __name__ == '__main__':
 
     print(f'Aggregate ODMs:')
     start = time.time()
+    # Not controlling sample size
+    print(f'No control on the sample size...')
     df_deso = commute_odms.odm_aggregation(df_dict=df_dict_deso, level='DeSO')
     df_muni = commute_odms.odm_aggregation(df_dict=df_dict_muni, level='Municipality')
     df_odms = pd.concat([df_deso, df_muni])
+    df_odms.loc[:, 'sample_size'] = len(df_dict_deso[10])
+
+    print(f'Control on the sample size...')
+    df_deso_c = commute_odms.odm_aggregation(df_dict=df_dict_deso, level='DeSO', sample_control=True)
+    df_muni_c = commute_odms.odm_aggregation(df_dict=df_dict_muni, level='Municipality', sample_control=True)
+    df_odms_c = pd.concat([df_deso_c, df_muni_c])
+    df_odms_c.loc[:, 'sample_size'] = len(df_dict_deso[1])  # Smallest sample size for the distance group
+
+    df_odms = pd.concat([df_odms, df_odms_c])
     # Save data
     engine = sqlalchemy.create_engine(
         f'postgresql://{commute_odms.user}:{commute_odms.password}'

@@ -23,6 +23,7 @@ sys.path.append(ROOT_dir)
 sys.path.insert(0, ROOT_dir + '/lib')
 
 from lib import preprocess as preprocess
+from lib import helpers as helpers
 
 
 class ActivityPatterns:
@@ -314,11 +315,14 @@ class ODMComparison:
             df_dict[qt] = df
         return df_dict
 
-    def odm_aggregation(self, df_dict=None, level=None):
+    def odm_aggregation(self, df_dict=None, level=None, sample_control=False):
         # Put MAD ODMs and ground truth data together
         # sv_commute, mad_commute
         df_agg_list = []
         for qt, df in df_dict.items():
+            if sample_control:
+                sample_size = len(df_dict[1])   # To make all distance-based groups the same amount of individuals
+                df = df.sample(n=sample_size, random_state=1)
             df_odm_mad = df.groupby(['ozone', 'dzone'])['wt'].sum().to_frame('mad_commute').reset_index()
             if level == 'DeSO':
                 df_agg = pd.merge(self.survey_deso, df_odm_mad, on=['ozone', 'dzone'], how='left').fillna(0)
@@ -334,25 +338,21 @@ class ODMComparison:
 
     def odm_comparison(self, df_odms=None, gt_field=None, mad_field=None):
         def ssi_measure(data):
-            data_ = data.copy()
             # Convert trip number to trip frequency (ranging between 0 and 1)
-            data_.loc[:, gt_field] = data_.loc[:, gt_field] / data_.loc[:, gt_field].sum()
-            data_.loc[:, mad_field] = data_.loc[:, mad_field] / data_.loc[:, mad_field].sum()
-            data_.loc[:, 'flow_min'] = data_.apply(lambda row: min(row[gt_field], row[mad_field]), axis=1)
-            SSI = 2 * data_.loc[:, 'flow_min'].sum() / \
-                  (data_.loc[:, gt_field].sum() + data_.loc[:, mad_field].sum())
+            SSI = helpers.odm_ssi(data, x_field=gt_field, y_field=mad_field)
 
             # Keep non-zero for both to compare
             data_non_zero = data.copy()
             data_non_zero = data_non_zero.loc[(data_non_zero[gt_field] != 0) & (data_non_zero[mad_field] != 0)]
-            data_non_zero.loc[:, gt_field] = data_non_zero.loc[:, gt_field] / data_non_zero.loc[:, gt_field].sum()
-            data_non_zero.loc[:, mad_field] = data_non_zero.loc[:, mad_field] / data_non_zero.loc[:, mad_field].sum()
-            data_non_zero.loc[:, 'flow_min'] = data_non_zero.apply(lambda row: min(row[gt_field], row[mad_field]), axis=1)
-            SSI_n = 2 * data_non_zero.loc[:, 'flow_min'].sum() / \
-                  (data_non_zero.loc[:, gt_field].sum() + data_non_zero.loc[:, mad_field].sum())
-            return pd.Series(dict(ssi=SSI, ssi_n=SSI_n))
+            SSI_n = helpers.odm_ssi(data_non_zero, x_field=gt_field, y_field=mad_field)
+
+            # Keep non-diagonal elements to compare
+            data_non_diagonal = data.copy()
+            data_non_diagonal = data_non_diagonal.loc[data_non_diagonal.ozone != data_non_diagonal.dzone]
+            SSI_nd = helpers.odm_ssi(data_non_diagonal, x_field=gt_field, y_field=mad_field)
+            return pd.Series(dict(ssi=SSI, ssi_n=SSI_n, ssi_nd=SSI_nd))
         tqdm.pandas()
-        df_ssi = df_odms.groupby(['level', 'qt']).progress_apply(ssi_measure).reset_index()
+        df_ssi = df_odms.groupby(['level', 'qt', 'sample_size']).progress_apply(ssi_measure).reset_index()
         return df_ssi
 
 
