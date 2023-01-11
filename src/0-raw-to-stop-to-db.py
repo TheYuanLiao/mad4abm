@@ -35,7 +35,7 @@ class DataPrep:
         :return: None
         :rtype: None
         """
-        self.raw_data_folder = 'raw_data_se_2019'  # under dbs/
+        self.raw_data_folder = 'D:\\MAD_dbs\\raw_data_se_2019'  # under the local drive D
         self.month = month
         self.user = preprocess.keys_manager['database']['user']
         self.password = preprocess.keys_manager['database']['password']
@@ -71,7 +71,7 @@ class DataPrep:
         """
         start = time.time()
         print("Data loading...")
-        path = os.path.join(ROOT_dir, "dbs", self.raw_data_folder, self.month, day)
+        path = os.path.join(self.raw_data_folder, self.month, day)
         file_list = os.listdir(path)
         df_list = []
         for file in file_list:
